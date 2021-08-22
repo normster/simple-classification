@@ -1,4 +1,5 @@
 import os
+import shutil
 import torch
 import torch.distributed as dist
 import torch.autograd as autograd
@@ -43,9 +44,13 @@ def is_main_process():
     return get_rank() == 0
 
 
-def save_on_master(*args, **kwargs):
+def save_on_master(state, is_best, output_dir):
     if is_main_process():
-        torch.save(*args, **kwargs)
+        ckpt_path = f'{output_dir}/checkpoint.pt'
+        best_path = f'{output_dir}/checkpoint_best.pt'
+        torch.save(state, ckpt_path)
+        if is_best:
+            shutil.copyfile(ckpt_path, best_path)
 
 
 def init_distributed_mode(args):

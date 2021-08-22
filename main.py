@@ -8,6 +8,7 @@ import numpy as np
 import sys
 import timm
 import time
+import wandb
 
 import torch
 import torch.cuda.amp as amp
@@ -40,6 +41,9 @@ def get_args_parser():
     parser.add_argument('--lr',default=0.1, type=float)
     parser.add_argument('--momentum', default=0.9, type=float)
     parser.add_argument('--wd', default=1e-4, type=float)
+    parser.add_argument('--optim', default='sgd', type=str)
+    parser.add_argument('--betas', default=(0.9, 0.999), nargs=2, type=float)
+    parser.add_argument('--eps', default=1e-8, type=float)
     parser.add_argument('--print-freq', default=10, type=int, help='print frequency')
     parser.add_argument('--resume', default='', type=str, help='path to latest checkpoint')
     parser.add_argument('--evaluate', action='store_true', help='Evaluate only')
@@ -53,6 +57,9 @@ def get_args_parser():
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--gpu', default=None, type=int, help='GPU id to use.')
     return parser
+
+
+best_acc1 = 0
 
 
 # dist eval introduces slight variance to results if
@@ -72,7 +79,8 @@ def get_loader_sampler(root, transform, args):
 
 def main(args):
     utils.init_distributed_mode(args)
-    print(args)
+
+    global best_acc1
 
     # fix the seed for reproducibility
     seed = args.seed + utils.get_rank()
@@ -91,8 +99,23 @@ def main(args):
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr,
-        momentum=args.momentum, weight_decay=args.wd)
+    p_wd, p_non_wd = [], []
+    for n, p in model.named_parameters():
+        if 'bias' in n or 'ln' in n or 'bn' in n:
+            p_non_wd.append(p)
+        else:
+            p_wd.append(p)
+
+    optim_params = [{"params": p_wd, "weight_decay": args.wd},
+                    {"params": p_non_wd, "weight_decay": 0}]
+
+    if args.optim == 'sgd':
+        optimizer = torch.optim.SGD(optim_params, lr=args.lr,
+            momentum=args.momentum, weight_decay=args.wd)
+    else:
+        optimizer = torch.optim.AdamW(optim_params, lr=args.lr, betas=args.betas,
+            eps=args.eps, weight_decay=args.wd)
+
     scaler = amp.GradScaler(enabled=not args.full_precision)
         
     # optionally resume from a checkpoint
@@ -109,16 +132,15 @@ def main(args):
             model.load_state_dict(checkpoint['state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer'])
             scaler.load_state_dict(checkpoint['scaler'])
+            best_acc1 = checkpoint['best_acc1']
             print("=> loaded resume checkpoint '{}' (epoch {})"
                   .format(args.resume, checkpoint['epoch']))
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
 
     # resume from latest checkpoint in output directory
-    all_checkpoints = [f for f in os.listdir(args.output_dir) if f.startswith('checkpoint_')]
-    if len(all_checkpoints) > 0:
-        latest = sorted(all_checkpoints)[-1]
-        latest = os.path.join(args.output_dir, latest)
+    latest = os.path.join(args.output_dir, 'checkpoint.pt')
+    if os.path.exists(latest):
         print("=> loading latest checkpoint '{}'".format(latest))
         if args.gpu is None:
             checkpoint = torch.load(latest)
@@ -130,6 +152,7 @@ def main(args):
         model.load_state_dict(checkpoint['state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         scaler.load_state_dict(checkpoint['scaler'])
+        best_acc1 = checkpoint['best_acc1']
         print("=> loaded latest checkpoint '{}' (epoch {})"
               .format(latest, checkpoint['epoch']))
 
@@ -158,8 +181,15 @@ def main(args):
         val_transform, args)
 
     if args.evaluate:
-        validate(train_loader, val_loader, model, args)
+        validate(val_loader, model, criterion, args)
         return
+
+    if utils.is_main_process():
+        wandb_id = os.path.split(args.output_dir)[-1]
+        wandb.init(project='simcls', id=wandb_id, config=args, resume='allow')
+        print('wandb step:', wandb.run.step)
+
+    print(args)
 
     print("=> beginning training")
     for epoch in range(args.start_epoch, args.epochs):
@@ -170,7 +200,11 @@ def main(args):
 
         # train for one epoch
         train_stats = train(train_loader, model, criterion, optimizer, scaler, epoch, args)
-        val_stats = validate(val_loader, model, args)
+        val_stats = validate(val_loader, model, criterion, args)
+        acc1 = val_stats['acc1']
+
+        is_best = acc1 > best_acc1
+        best_acc1 = max(acc1, best_acc1)
 
         print("=> saving checkpoint")
         utils.save_on_master({
@@ -178,15 +212,16 @@ def main(args):
             'state_dict': model.state_dict(),
             'optimizer' : optimizer.state_dict(),
             'scaler': scaler.state_dict(),
-            'acc': val_stats['acc1'],
+            'best_acc1': best_acc1,
             'args': args,
-        }, f'{args.output_dir}/checkpoint_{epoch:04d}.pt')
+        }, is_best, args.output_dir)
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      **{f'test_{k}': v for k, v in val_stats.items()},
                      'epoch': epoch}
 
         if utils.is_main_process():
+            wandb.log(log_stats)
             with open(os.path.join(args.output_dir, 'log.txt'), 'a') as f:
                 f.write(json.dumps(log_stats) + '\n')
 
@@ -242,6 +277,8 @@ def train(train_loader, model, criterion, optimizer, scaler, epoch, args):
         mem.update(torch.cuda.max_memory_allocated() // 1e9)
 
         if i % args.print_freq == 0:
+            if utils.is_main_process():
+                wandb.log({'acc': acc1.item(), 'loss': loss.item(), 'scaler': scaler.get_scale()})
             progress.display(i)
 
     progress.synchronize()
