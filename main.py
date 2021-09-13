@@ -56,6 +56,7 @@ def get_args_parser():
     parser.add_argument('--dist-backend', default='nccl', type=str)
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--gpu', default=None, type=int, help='GPU id to use.')
+    parser.add_argument('--wandb', action='store_true', help='Enable WandB')
     return parser
 
 
@@ -90,7 +91,6 @@ def main(args):
     # create model
     print("=> creating model")
     model = timm.create_model(args.arch)
-    print(model)
     model.cuda(args.gpu)
 
     if args.distributed:
@@ -184,7 +184,7 @@ def main(args):
         validate(val_loader, model, criterion, args)
         return
 
-    if utils.is_main_process():
+    if utils.is_main_process() and args.wandb:
         wandb_id = os.path.split(args.output_dir)[-1]
         wandb.init(project='simcls', id=wandb_id, config=args, resume='allow')
         print('wandb step:', wandb.run.step)
@@ -221,7 +221,8 @@ def main(args):
                      'epoch': epoch}
 
         if utils.is_main_process():
-            wandb.log(log_stats)
+            if args.wandb:
+                wandb.log(log_stats)
             with open(os.path.join(args.output_dir, 'log.txt'), 'a') as f:
                 f.write(json.dumps(log_stats) + '\n')
 
@@ -277,7 +278,7 @@ def train(train_loader, model, criterion, optimizer, scaler, epoch, args):
         mem.update(torch.cuda.max_memory_allocated() // 1e9)
 
         if i % args.print_freq == 0:
-            if utils.is_main_process():
+            if utils.is_main_process() and args.wandb:
                 wandb.log({'acc': acc1.item(), 'loss': loss.item(), 'scaler': scaler.get_scale()})
             progress.display(i)
 
