@@ -19,7 +19,6 @@ import torch.distributed as dist
 import torch.optim
 import torch.utils.data
 import torch.utils.data.distributed
-import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 
 import utils
@@ -27,7 +26,8 @@ import utils
 
 def get_args_parser():
     parser = argparse.ArgumentParser(description='Simple ImageNet classification', add_help=False)
-    parser.add_argument('--data', default='/datasets01/imagenet_full_size/061417/', type=str)
+    parser.add_argument('--train-data', default='imagenet_train.pkl', type=str)
+    parser.add_argument('--val-data', default='imagenet_val.pkl', type=str)
     parser.add_argument('--arch', default='resnet50', type=str)
     parser.add_argument('--output-dir', default='./', type=str, help='output dir')
     parser.add_argument('-j', '--workers', default=10, type=int, metavar='N',
@@ -65,8 +65,8 @@ best_acc1 = 0
 
 # dist eval introduces slight variance to results if
 # num samples != 0 mod (batch size * num gpus)
-def get_loader_sampler(root, transform, args):
-    dataset = datasets.ImageFolder(root, transform=transform)
+def get_loader_sampler(data, transform, args):
+    dataset = utils.CachedImageFolder(data, transform=transform)
     if args.distributed:
         sampler = torch.utils.data.distributed.DistributedSampler(dataset)
     else:
@@ -175,9 +175,9 @@ def main(args):
             normalize
         ])
 
-    train_loader, train_sampler = get_loader_sampler(os.path.join(args.data, 'train'),
+    train_loader, train_sampler = get_loader_sampler(args.train_data,
         train_transform, args)
-    val_loader, _ = get_loader_sampler(os.path.join(args.data, 'val'),
+    val_loader, _ = get_loader_sampler(args.val_data,
         val_transform, args)
 
     if args.evaluate:
