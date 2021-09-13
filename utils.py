@@ -1,4 +1,6 @@
 import os
+import pickle
+from PIL import Image
 import shutil
 import torch
 import torch.distributed as dist
@@ -77,3 +79,29 @@ def init_distributed_mode(args):
     torch.distributed.barrier()
     setup_for_distributed(args.rank == 0)
 
+
+def pil_loader(path):
+    # open path as file to avoid ResourceWarning (https://github.com/python-pillow/Pillow/issues/835)
+    with open(path, 'rb') as f:
+        img = Image.open(f)
+        return img.convert('RGB')
+
+
+class CachedImageFolder(torch.utils.data.Dataset):
+    def __init__(self, data, transform=None):
+        self.transform = transform
+        cwd = os.path.dirname(os.path.realpath(__file__))
+        with open(os.path.join(cwd, data), 'rb') as f:
+            self.samples = pickle.load(f)
+
+    def __getitem__(self, index):
+        path, target = self.samples[index]
+        img = pil_loader(path)
+
+        if self.transform is not None:
+            img = self.transform(img)
+
+        return img, target
+
+    def __len__(self):
+        return len(self.samples)
