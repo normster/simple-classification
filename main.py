@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import os
+from PIL import Image
 import numpy as np
 import sys
 import timm
@@ -51,7 +52,8 @@ def get_args_parser():
                         help='number of nodes for distributed training')
     parser.add_argument('--rank', default=0, type=int,
                         help='node rank for distributed training')
-    parser.add_argument('--dist-url', default='tcp://localhost:10001', type=str,
+    parser.add_argument("--local_rank", type=int, default=0)
+    parser.add_argument('--dist-url', default='env://', type=str,
                         help='url used to set up distributed training')
     parser.add_argument('--dist-backend', default='nccl', type=str)
     parser.add_argument('--seed', default=0, type=int)
